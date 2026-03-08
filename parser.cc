@@ -21,6 +21,8 @@
 #include "globals.h"
 #include "cmdline.h"
 #include "parser.h"
+#include "mmio.h"
+#include "nvic.h"
 
 
 // Returns the perms associated with a string
@@ -291,6 +293,78 @@ void parse_static_config(bool* pTrackExec, json config) {
              exit(-1);
       }
       G_LOCAL_CONFIG.emu_heap_end = G_LOCAL_CONFIG.emu_heap_begin + size;
+  }
+
+  // Parse max basic blocks limit (0 = unlimited)
+  G_LOCAL_CONFIG.max_basic_blocks = 0;
+  string max_bb_str = config.value("max_basic_blocks", "0");
+  ulong max_bb_val = 0;
+  if (cnv_string_2_long(max_bb_str, &max_bb_val)) {
+      G_LOCAL_CONFIG.max_basic_blocks = (uint32_t)max_bb_val;
+  }
+  if (G_LOCAL_CONFIG.max_basic_blocks > 0) {
+      log_debug("[Config]  emu        : max_basic_blocks=%u\n", G_LOCAL_CONFIG.max_basic_blocks);
+  }
+
+}
+
+
+// Parse MMIO ranges and IRQ interval from config
+// Must be called after G_MMIO and G_NVIC are initialized (i.e., after register_user_hooks)
+void parse_mmio_nvic_config(json config) {
+  json j_null;
+
+  // Parse MMIO ranges for Fuzzware-style MMIO fuzzing
+  json mmio_ranges = config.value("mmio_ranges", j_null);
+  if (mmio_ranges != j_null && G_MMIO != nullptr) {
+      for (auto& elem : mmio_ranges) {
+          mmio_range_t range;
+          if (!cnv_string_2_long(elem.value("start", "none"), &range.start)) {
+              log_error("ERROR: Unable to parse mmio_ranges start address\n");
+              exit(-1);
+          }
+          if (!cnv_string_2_long(elem.value("end", "none"), &range.end)) {
+              log_error("ERROR: Unable to parse mmio_ranges end address\n");
+              exit(-1);
+          }
+          G_MMIO->ranges.push_back(range);
+          log_info("[MMIO] Registered range 0x%lx - 0x%lx\n", range.start, range.end);
+      }
+  }
+
+  // Parse IRQ interval and VTOR for NVIC
+  if (G_NVIC != nullptr) {
+      uint64_t irq_interval = 0;
+      if (cnv_string_2_long(config.value("irq_interval", "none"), &irq_interval)) {
+          G_NVIC->irq_interval = (uint32_t)irq_interval;
+          log_info("[NVIC] IRQ interval set to %u basic blocks\n", G_NVIC->irq_interval);
+      }
+
+      uint64_t vtor = 0;
+      if (cnv_string_2_long(config.value("vtor", "none"), &vtor)) {
+          G_NVIC->vtor = (uint32_t)vtor;
+          log_info("[NVIC] VTOR set to 0x%08x\n", G_NVIC->vtor);
+      }
+
+      // Parse enabled_irqs: list of IRQ numbers to pre-enable for round-robin injection
+      // This is useful when skipping init code that would normally enable IRQs via NVIC ISER
+      json enabled_irqs = config.value("enabled_irqs", j_null);
+      if (enabled_irqs != j_null) {
+          G_NVIC->num_pre_enabled = 0;
+          for (auto& elem : enabled_irqs) {
+              uint64_t irq_num = 0;
+              if (cnv_string_2_long(elem, &irq_num)) {
+                  int exc = (int)irq_num + EXC_EXTERNAL_BASE;
+                  if ((int)irq_num < G_NVIC->num_irq && G_NVIC->num_pre_enabled < NVIC_MAX_VECTORS) {
+                      G_NVIC->vectors[exc].enabled = 1;
+                      G_NVIC->pre_enabled_irqs[G_NVIC->num_pre_enabled++] = exc;
+                      log_info("[NVIC] Pre-enabled IRQ %lu (exception %d)\n", irq_num, exc);
+                  } else {
+                      log_error("[NVIC] ERROR: IRQ %lu exceeds num_irq (%d)\n", irq_num, G_NVIC->num_irq);
+                  }
+              }
+          }
+      }
   }
 }
 

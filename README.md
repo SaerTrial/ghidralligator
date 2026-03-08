@@ -52,6 +52,74 @@ In order to run Ghidralligator the following steps must be done:
 
 
 
+## Cortex-M Firmware Fuzzing
+
+Ghidralligator includes support for fuzzing ARM Cortex-M firmware with Fuzzware-style MMIO fuzzing and NVIC interrupt emulation.
+
+### MMIO Fuzzing
+
+Peripheral (MMIO) reads are served from the fuzzer input instead of real hardware registers. Configure MMIO address ranges in the config file:
+
+```json
+"mmio_ranges": [
+    {
+        "start": "0x40000000",
+        "end": "0x5FFFFFFF"
+    }
+]
+```
+
+Any load from an address in these ranges consumes 4 bytes from the AFL test case. Stores to MMIO ranges are silently dropped.
+
+### NVIC Interrupt Injection
+
+The emulator includes a Cortex-M NVIC that injects interrupts using a basic-block-count timer with round-robin selection across enabled IRQs (matching Fuzzware's default model).
+
+Configure in the JSON config file:
+
+```json
+"irq_interval": "100",
+"vtor": "0x08000000",
+"enabled_irqs": [
+    "40",
+    "39"
+]
+```
+
+| Field | Description |
+|-------|-------------|
+| `irq_interval` | Fire an interrupt every N basic blocks (0 = disabled) |
+| `vtor` | Vector Table Offset Register address |
+| `enabled_irqs` | List of IRQ numbers to pre-enable for round-robin injection. Use this when skipping init code that would normally enable IRQs via NVIC ISER writes. Values are IRQ numbers (not exception numbers); e.g., IRQ 40 = exception 56. |
+
+The interrupt injection flow:
+1. Every `irq_interval` basic blocks, the next enabled IRQ is selected via round-robin
+2. The IRQ is set pending in the NVIC
+3. At the next instruction boundary, if the pending IRQ has higher priority than current execution, the NVIC performs exception entry (pushes stack frame, sets LR to EXC_RETURN, jumps to vector table handler)
+4. When the handler returns via `BX LR` with an EXC_RETURN value, the NVIC restores the pre-interrupt state
+
+### Execution Limits
+
+```json
+"max_basic_blocks": "1000"
+```
+
+Caps the number of basic blocks per test case. Useful for preventing infinite loops from consuming all fuzzing time.
+
+### Cortex-M Example
+
+A complete Cortex-M example is provided in [`examples/cortexm/`](examples/cortexm/), targeting an STM32H753 Nucleo board firmware with UART input parsing and interrupt handlers.
+
+```bash
+# Replay mode (single run with test input)
+./ghidralligator -m replay -c examples/cortexm/config.json -i input.bin -I
+
+# Fuzz mode (with AFL++)
+mkdir afl_inputs afl_outputs
+echo -n "AAAA" > ./afl_inputs/seed.bin
+AFL_SKIP_BIN_CHECK=1 afl-fuzz -i ./afl_inputs -o ./afl_outputs/ -- ./ghidralligator -m fuzz -c examples/cortexm/config.json
+```
+
 ## Documentations
 
 * [Ghidralligator Configuration File](docs/configuration_file.md) : Documentation for configuration file writing.
@@ -60,7 +128,7 @@ In order to run Ghidralligator the following steps must be done:
 
 ## Tutorials
 
-To understand how to use Ghidralligator, an [example](examples) of a vulnerable program, compiled on different architectures, has been made. 
+To understand how to use Ghidralligator, an [example](examples) of a vulnerable program, compiled on different architectures, has been made.
 
 You can run [run_examples.sh](examples/run_examples.sh) to see ASAN mechanisms in action.
 

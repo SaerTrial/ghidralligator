@@ -1,5 +1,23 @@
 AFLplusplus
 .claude
+
+# Build artifacts
+*.o
+*.a
+ghidralligator
+ghidralligator_dbg
+src/com_opt/
+src/com_dbg/
+src/libsla.a
+src/libsla_dbg.a
+
+# Fuzzing artifacts
 fuzz_corpus
+fuzz_corpus_new
 fuzz_output
-nucleo-h753zi-RnR.bin
+fuzz_input
+fuzz_input_uart
+fuzz_dict
+
+# Binary files
+*.bin

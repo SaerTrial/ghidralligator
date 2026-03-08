@@ -32,6 +32,7 @@ void parse_static_config(bool* pTrackExec, json config);
 void loader_init_map();
 void loader_main_memory_section();
 void loader_add_new_section(uint32_t idx);
+void parse_mmio_nvic_config(json config);
 
 
 #endif

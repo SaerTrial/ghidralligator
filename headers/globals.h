@@ -44,6 +44,7 @@ extern uint64_t G_CURRENT_ALLOC_ADDR;
 
 // Allows multiple and various components to report an emulation error to the engine
 inline volatile sig_atomic_t G_EMULATION_ABORT_FLAG;
+inline volatile sig_atomic_t G_FORCE_CRASH_FLAG;
 
 
 #define LOG_LVL_NO_LOG  0

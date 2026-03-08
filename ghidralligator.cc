@@ -35,6 +35,8 @@
 #include "globals.h"
 #include "fuzzers.h"
 #include "cmdline.h"
+#include "nvic.h"
+#include "mmio.h"
 
 #include <mcheck.h>
 #include <stdlib.h>
@@ -89,6 +91,7 @@ void PcodeRawOut::dump(const Address &addr, OpCode opc, VarnodeData *outvar, Var
 bool ForceCrashCallback::addressCallback(const Address &addr) {
   log_info("[HOOK][addr]: Force crash at 0x%lx\n", emulate->getExecuteAddress().getOffset());
   G_EMULATION_ABORT_FLAG = 1;
+  G_FORCE_CRASH_FLAG = 1;
   return true;
 };
 
@@ -96,6 +99,7 @@ bool ForceCrashCallback::addressCallback(const Address &addr) {
 bool ForceCrashCallback::pcodeCallback(PcodeOpRaw *curop) {
   log_info("[HOOK][pcode]: Force crash at 0x%lx\n", emulate->getExecuteAddress().getOffset());
   G_EMULATION_ABORT_FLAG = 1;
+  G_FORCE_CRASH_FLAG = 1;
   return true;
 };
 
@@ -146,6 +150,18 @@ void EmuPcodeCache::executeStore(void) {
     off = AddrSpace::addressToByte(off, spc->getWordSize());
     log_debug("EmuPcodeCache::executeStore: off: 0x%lx - val: 0x%lx\n", off, val);
 
+    // Intercept NVIC MMIO writes
+    if (G_NVIC && nvic_is_scs_addr(off)) {
+        nvic_write(G_NVIC, (uint32_t)off, (uint32_t)val, currentOp->getInput(2)->size);
+        return;  // No fallthruOp() — parent handles it
+    }
+
+    // Intercept MMIO writes: silently drop peripheral writes
+    if (G_MMIO && mmio_is_mmio_addr(G_MMIO, off)) {
+        mmio_fuzz_write(G_MMIO, off, val, currentOp->getInput(2)->size);
+        return;  // No fallthruOp() — parent handles it
+    }
+
     check_address_perms_write(off, currentOp->getAddr().getOffset(), currentOp->getInput(2)->size);
 
     // Call original func
@@ -161,6 +177,24 @@ void EmuPcodeCache::executeLoad(void) {
 
     off = AddrSpace::addressToByte(off,spc->getWordSize());
     log_debug("EmuPcodeCache::executeLoad: off: 0x%lx - size: 0x%x\n", off, currentOp->getOutput()->size);
+
+    // Intercept NVIC MMIO reads
+    if (G_NVIC && nvic_is_scs_addr(off)) {
+        uint32_t val = nvic_read(G_NVIC, (uint32_t)off, currentOp->getOutput()->size);
+        memstate->setValue(currentOp->getOutput(), (uintb)val);
+        return;
+    }
+
+    // Intercept MMIO reads: consume bytes from fuzzer input
+    if (G_MMIO && mmio_is_mmio_addr(G_MMIO, off)) {
+        uint64_t val = 0;
+        if (!mmio_fuzz_read(G_MMIO, off, currentOp->getOutput()->size, &val)) {
+            // Input exhausted — end this test case
+            setHalt(true);
+        }
+        memstate->setValue(currentOp->getOutput(), (uintb)val);
+        return;
+    }
 
     check_address_perms_read(off, currentOp->getAddr().getOffset(), currentOp->getOutput()->size);
 
@@ -181,9 +215,11 @@ static void wrapper_emulation(
         bool track_exec,
         Translate &trans,
         LoadImage &loader,
-        const fuzz_target &target) {
+        const fuzz_target &target,
+        json &config) {
 
     G_EMULATION_ABORT_FLAG = 0;
+    G_FORCE_CRASH_FLAG = 0;
 
     // Set up memory state object
     MemoryImage loadmemory(trans.getDefaultCodeSpace(), 8, 4096, &loader);
@@ -234,11 +270,18 @@ static void wrapper_emulation(
       }
     }
 
+    // Parse MMIO ranges and IRQ interval now that G_MMIO/G_NVIC are initialized
+    parse_mmio_nvic_config(config);
+
     // Register stop addresses from the configuration file
+    // In fuzz mode, stop addresses trigger a crash signal so AFL saves those inputs
     for (int x = 0; x < G_LOCAL_CONFIG.stop_address_number; ++x) {
         log_debug("[Config]  emu        : stop=0x%lx\n", G_LOCAL_CONFIG.stop_addresses[x]);
-        breaktable.registerAddressCallback(Address(trans.getDefaultCodeSpace(), G_LOCAL_CONFIG.stop_addresses[x]), &terminatecallback);
-
+        if (G_LOCAL_CONFIG.fuzz_mode) {
+            breaktable.registerAddressCallback(Address(trans.getDefaultCodeSpace(), G_LOCAL_CONFIG.stop_addresses[x]), &force_crash_callback);
+        } else {
+            breaktable.registerAddressCallback(Address(trans.getDefaultCodeSpace(), G_LOCAL_CONFIG.stop_addresses[x]), &terminatecallback);
+        }
     }
 
     // Dynamically register some hooks for user-defined  opcode during emulation
@@ -290,6 +333,11 @@ static void wrapper_emulation(
             G_LOCAL_CONFIG.test_case = buf;
         }
 
+        // Feed test case to MMIO fuzzing engine
+        if (G_MMIO) {
+            mmio_reset(G_MMIO, G_LOCAL_CONFIG.test_case, G_LOCAL_CONFIG.test_case_len);
+        }
+
         afl_reset_trace();
 
         if (G_LOG_LEVEL >= LOG_LVL_INFO) {
@@ -308,11 +356,31 @@ static void wrapper_emulation(
 
         pcode.jump = false;
         bool record_bb = false;
+        uint32_t bb_count = 0;
+        uint32_t total_bb_count = 0;
+        uint64_t prev_pc = 0xDEADDEAD;
+        int round_robin_idx = 0;
         G_EMULATION_ABORT_FLAG = 0;
+        G_FORCE_CRASH_FLAG = 0;
         while(!emulater.getHalt()) {
 
             // Get current address (relative to the emulator)
             Address pc = emulater.getExecuteAddress();
+
+            // Handle EXC_RETURN (Cortex-M exception return)
+            if (G_NVIC && nvic_is_exc_return(pc.getOffset())) {
+                nvic_exception_return(G_NVIC, &memstate, &emulater, (uint32_t)pc.getOffset());
+                continue;
+            }
+
+            // Check for pending interrupts that can preempt
+            if (G_NVIC && nvic_has_pending(G_NVIC)) {
+                int exc = nvic_acknowledge(G_NVIC);
+                if (exc > 0) {
+                    nvic_exception_entry(G_NVIC, &memstate, &emulater, exc);
+                    continue;
+                }
+            }
 
             // Check if we have the permissions to execute the current address
             if (track_exec) {
@@ -322,7 +390,9 @@ static void wrapper_emulation(
             if (G_EMULATION_ABORT_FLAG == 1) {
                 log_info("emulation aborted at address 0x%lx\n", pc.getOffset());
                 if (G_LOCAL_CONFIG.fuzz_mode) {
-                    G_LOCAL_CONFIG.AFL->crash = true;
+                    // Only report as crash if a ForceCrash callback triggered it
+                    // (i.e. target address was reached), not for generic errors
+                    G_LOCAL_CONFIG.AFL->crash = G_FORCE_CRASH_FLAG;
                  }
                 // stop emulation
                 break;
@@ -341,8 +411,16 @@ static void wrapper_emulation(
                 dump_register(&emulater);
             }
 
+            // Detect self-loops (b .) where the p-code cache prevents
+            // pcode.jump from being set on subsequent iterations
+            if (pc.getOffset() == prev_pc) {
+                pcode.jump = true;
+            }
+
             // Process P-Code and populate our 'pcode' object
             trans.oneInstruction(pcode, pc);
+
+            prev_pc = pc.getOffset();
 
             // manage memory restore in case of crash/hang
             bIsMemRestore = false;
@@ -360,6 +438,27 @@ static void wrapper_emulation(
             if (pcode.jump) {
                 pcode.jump = false;
                 record_bb = true;
+                total_bb_count++;
+
+                // Max BB limit to prevent infinite loops during fuzzing
+                if (G_LOCAL_CONFIG.max_basic_blocks > 0 && total_bb_count >= G_LOCAL_CONFIG.max_basic_blocks) {
+                    log_debug("[EMU] Max basic block limit reached (%u)\n", G_LOCAL_CONFIG.max_basic_blocks);
+                    emulater.setHalt(true);
+                    break;
+                }
+
+                // BB-count based interrupt injection (Fuzzware-style)
+                if (G_NVIC && G_NVIC->irq_interval > 0) {
+                    bb_count++;
+                    if (bb_count >= G_NVIC->irq_interval) {
+                        bb_count = 0;
+                        int irq = nvic_next_enabled_irq(G_NVIC, &round_robin_idx);
+                        if (irq >= 0) {
+                            log_debug("[IRQ] BB-count trigger: pend exception %d\n", irq);
+                            nvic_set_pending_exception(G_NVIC, irq);
+                        }
+                    }
+                }
             }
         } // End while(!emulater.getHalt())
 	
@@ -375,6 +474,10 @@ static void wrapper_emulation(
         } else {
 
           //replay mode
+          printf("[Replay] Final PC: 0x%lx  BBs: %u  Crash: %d\n",
+                 emulater.getExecuteAddress().getOffset(),
+                 total_bb_count,
+                 G_LOCAL_CONFIG.AFL->crash ? 1 : 0);
           if (G_ENABLE_TRACE) {
             G_LOCAL_CONFIG.trace_file_out.close();
             printf("Execution trace available under '%s'.\n", G_LOCAL_CONFIG.trace_file.c_str());
@@ -387,6 +490,11 @@ static void wrapper_emulation(
         // Reset the registers state back to original
         memstate = reset_registers(memstate);
         emulater.setExecuteAddress(Address(trans.getDefaultCodeSpace(), G_LOCAL_CONFIG.start_address));
+
+        // Reset NVIC state between test cases
+        if (G_NVIC) {
+            nvic_reset(G_NVIC);
+        }
 
         // free buffers (Ex: permission buffers for a test case) allocated for this emulation run
         memory_free_tmp_permissions();
@@ -549,5 +657,5 @@ int main(int argc, char **argv) {
       context.setVariableDefault(elem.name, elem.value);
   }
 
-  wrapper_emulation(track_exec, trans, configLoader, *target);
+  wrapper_emulation(track_exec, trans, configLoader, *target, config);
 }

@@ -1,0 +1,123 @@
+{
+    "sla_file": "specfiles/ARM8_le.sla",
+    "target": "cortexm",
+    "start_address": "0x08003b00",
+    "stop_addresses": [
+        "0x08003c0c"
+    ],
+    "track_exec_operations": "true",
+    "set_variable_default": [
+        {
+            "name": "TMode",
+            "value": "1"
+        }
+    ],
+    "registers": [
+        {
+            "name": "r0",
+            "value": "0x0"
+        },
+        {
+            "name": "r1",
+            "value": "0x0"
+        },
+        {
+            "name": "r2",
+            "value": "0x0"
+        },
+        {
+            "name": "r3",
+            "value": "0x0"
+        },
+        {
+            "name": "r4",
+            "value": "0x0"
+        },
+        {
+            "name": "r5",
+            "value": "0x0"
+        },
+        {
+            "name": "r6",
+            "value": "0x0"
+        },
+        {
+            "name": "r7",
+            "value": "0x0"
+        },
+        {
+            "name": "r8",
+            "value": "0x0"
+        },
+        {
+            "name": "r9",
+            "value": "0x0"
+        },
+        {
+            "name": "r10",
+            "value": "0x0"
+        },
+        {
+            "name": "r11",
+            "value": "0x0"
+        },
+        {
+            "name": "r12",
+            "value": "0x0"
+        },
+        {
+            "name": "sp",
+            "value": "0x20020000"
+        },
+        {
+            "name": "lr",
+            "value": "0xFFFFFFFF"
+        },
+        {
+            "name": "cpsr",
+            "value": "0x01000000"
+        }
+    ],
+    "emu_heap": {
+        "address": "0x20010000",
+        "size": "0x10000"
+    },
+    "mmio_ranges": [
+        {
+            "start": "0x40000000",
+            "end": "0x5FFFFFFF"
+        }
+    ],
+    "max_basic_blocks": "1000",
+    "irq_interval": "100",
+    "vtor": "0x08000000",
+    "enabled_irqs": [
+        "40"
+    ],
+    "sections": [
+        {
+            "name": "flash",
+            "address": "0x08000000",
+            "offset": "0x0",
+            "size": "0x5aa8",
+            "path": "./examples/cortexm/nucleo-h753zi-RnR.bin",
+            "perms": "READ|EXEC"
+        },
+        {
+            "name": "ram",
+            "address": "0x20000000",
+            "offset": "0x0",
+            "size": "0x20000",
+            "path": "local",
+            "perms": "READ|WRITE"
+        },
+        {
+            "name": "scs",
+            "address": "0xE000E000",
+            "offset": "0x0",
+            "size": "0x1000",
+            "path": "local",
+            "perms": "READ|WRITE"
+        }
+    ]
+}

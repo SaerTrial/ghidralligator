@@ -106,6 +106,7 @@ typedef struct {
   vector<sectionConfig> sections;
   uint64_t emu_heap_begin;
   uint64_t emu_heap_end;
+  uint32_t max_basic_blocks;
 } localConfig;
 
 
